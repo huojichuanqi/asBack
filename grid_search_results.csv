@@ -1,0 +1,2 @@
+final_equity,return_pct,max_drawdown,realized_pnl,unrealized_pnl,total_pnl,trades,direction,strategy_name,long_up,long_down,short_up,short_down
+942.0619196625927,-0.05793808033740731,0.060566075652327966,2.3887317758247573,-0.3268121132318726,2.0619196625928846,56,long,保守策略,0.003,0.003,0.003,0.003

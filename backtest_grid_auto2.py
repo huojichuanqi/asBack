@@ -12,9 +12,6 @@ class GridOrderBacktester:
         self.grid_spacing = grid_spacing
         self.config = config
 
-        self.long_settings = config["long_settings"]
-        self.short_settings = config["short_settings"]
-
         self.balance = config["initial_balance"]
         self.max_drawdown = config["max_drawdown"]
         self.fee = config["fee_pct"]
@@ -29,12 +26,7 @@ class GridOrderBacktester:
 
         self.orders = {"long": [], "short": []}
         self.last_refresh_time = None  # 用来记录上次刷新挂单的时间
-        self.last_long_price = None  # 记录多头最后成交价
-        self.last_short_price = None  # 记录空头最后成交价
-
         self._init_orders(self.df['close'].iloc[0])
-
-
 
     def _init_orders(self, price):
         if self.direction in ["long", "both"]:
@@ -42,21 +34,17 @@ class GridOrderBacktester:
         if self.direction in ["short", "both"]:
             self._place_short_orders(price)
 
-    def _place_long_orders(self, current_price):
-        """多头网格：上方止盈，下方补仓"""
+    def _place_long_orders(self, center_price):
         self.orders["long"] = [
-            (current_price * (1 - self.long_settings["down_spacing"]), "BUY"),  # 下方补仓
-            (current_price * (1 + self.long_settings["up_spacing"]), "SELL")  # 上方止盈
+            (center_price - center_price * self.grid_spacing, "BUY"),
+            (center_price + center_price * self.grid_spacing, "SELL")
         ]
-        self.last_long_price = current_price
 
-    def _place_short_orders(self, current_price):
-        """空头网格：上方补仓，下方止盈"""
+    def _place_short_orders(self, center_price):
         self.orders["short"] = [
-            (current_price * (1 + self.short_settings["up_spacing"]), "SELL_SHORT"),  # 上方补仓
-            (current_price * (1 - self.short_settings["down_spacing"]), "COVER_SHORT")  # 下方止盈
+            (center_price + center_price * self.grid_spacing, "SELL_SHORT"),
+            (center_price - center_price * self.grid_spacing, "COVER_SHORT")
         ]
-        self.last_short_price = current_price
 
     def _update_orders_after_trade(self, side, fill_price):
         if side == "long":
@@ -65,14 +53,12 @@ class GridOrderBacktester:
             self._place_short_orders(fill_price)
 
     def _refresh_orders_if_needed(self, price, current_time):
-        # 定期刷新所有挂单
-        if self.last_refresh_time is None or (current_time - self.last_refresh_time) >= timedelta(
-                minutes=self.config["grid_refresh_interval"]):
-            if self.direction in ["long", "both"]:
-                self._place_long_orders(price)
-            if self.direction in ["short", "both"]:
-                self._place_short_orders(price)
-            self.last_refresh_time = current_time
+        # 用数据时间判断挂单刷新（而不是系统时间）
+        if not self.long_positions and not self.short_positions:
+            if self.last_refresh_time is None or (current_time - self.last_refresh_time) >= timedelta(
+                    minutes=self.config["grid_refresh_interval"]):
+                self._init_orders(price)
+                self.last_refresh_time = current_time
 
     def _calculate_unrealized_pnl(self, price):
         # 多头：市值 - 成本
@@ -411,56 +397,31 @@ def plot_equity_curve(bt):
     plt.show()
 
 
-def visualize_advanced_results(df_results):
-    plt.figure(figsize=(14, 8))
-
-    # 创建子图网格
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12))
-
-    # 第一张图：多空收益率对比
-    sns.barplot(data=df_results, x="strategy_name", y="return_pct",
-                hue="direction", palette="viridis", ax=ax1)
-    ax1.set_title("long short")
-    ax1.set_ylabel("pnl (%)")
-    ax1.axhline(0, color="black", linestyle="--")
-
-    # 第二张图：参数热力图
-    param_df = df_results[["strategy_name", "long_up", "long_down", "short_up", "short_down", "return_pct"]]
-    param_df = param_df.melt(id_vars=["strategy_name", "return_pct"],
-                             var_name="param", value_name="spacing")
-
-    sns.scatterplot(data=param_df, x="spacing", y="return_pct",
-                    hue="param", style="strategy_name",
-                    s=200, ax=ax2)
-    ax2.set_title("xxx")
-    ax2.set_xlabel("a")
-    ax2.set_ylabel("pnl (%)")
-
-    plt.tight_layout()
-    plt.show()
-
-
 def grid_search_backtest():
     results = []
     best_result = None
     best_params = None
 
-    for params in CONFIG["param_sets"]:
-        print(f"\n🚀 回测策略: {params['name']}")
-        print(f"  多头设置 | 止盈: {params['long_settings']['up_spacing'] * 100:.2f}% "
-              f"补仓: {params['long_settings']['down_spacing'] * 100:.2f}%")
-        print(f"  空头设置 | 补仓: {params['short_settings']['up_spacing'] * 100:.2f}% "
-              f"止盈: {params['short_settings']['down_spacing'] * 100:.2f}%")
+    for spacing in CONFIG["grid_spacing_range"]:
+        print(f"🚀 回测 Grid Spacing: {spacing}")
+        result = run_backtest_for_params(spacing)
+        if result:
+            results.append({
+                "spacing": spacing,
+                **result
+            })
+            if not best_result or result["return_pct"] > best_result["return_pct"]:
+                best_result = result
+                best_params = spacing
 
-        # 创建临时配置
-        temp_config = CONFIG.copy()
-        del temp_config["param_sets"]
-        temp_config.update({
-            "long_settings": params["long_settings"],
-            "short_settings": params["short_settings"]
-        })
+    df_results = pd.DataFrame(results)
+    df_results.to_csv("grid_order_results.csv", index=False)
 
-        # 加载数据
+    if best_params:
+        print("\n✅ 最优参数:")
+        print(f"Grid Spacing: {best_params}")
+        visualize_results(df_results)
+
         current = CONFIG["start_date"]
         all_data = []
         while current <= CONFIG["end_date"]:
@@ -469,76 +430,36 @@ def grid_search_backtest():
                 all_data.append(df)
             current += timedelta(days=1)
 
-        if not all_data:
-            continue
-
         full_df = pd.concat(all_data, ignore_index=True)
-        bt = GridOrderBacktester(full_df, None, temp_config)
-        result = bt.run()
-
-        # 记录结果
-        result.update({
-            "strategy_name": params["name"],
-            "long_up": params["long_settings"]["up_spacing"],
-            "long_down": params["long_settings"]["down_spacing"],
-            "short_up": params["short_settings"]["up_spacing"],
-            "short_down": params["short_settings"]["down_spacing"]
-        })
-        results.append(result)
-
-        # 更新最佳结果
-        if best_result is None or result["return_pct"] > best_result["return_pct"]:
-            best_result = result
-            best_bt = bt  # 保存最佳回测实例
-
-    # 输出结果
-    df_results = pd.DataFrame(results)
-    df_results.to_csv("grid_search_results.csv", index=False)
-
-    if not df_results.empty:
-        print("\n✅ 最优策略:")
-        print(f"名称: {best_result['strategy_name']}")
-        print(f"收益率: {best_result['return_pct'] * 100:.2f}%")
-
-        # 使用原始的plot_equity_curve函数
+        best_bt = GridOrderBacktester(full_df, best_params, CONFIG)
+        best_bt.run()
+        # ✅ 提前导出当前持仓（run 后立刻）
+        best_bt.export_positions("best_grid_positions.csv")
         plot_equity_curve(best_bt)
-
-        # 导出最佳结果
-        best_bt.export_trades("best_grid_trades.csv")
-        best_bt.export_equity_curve("best_equity_curve.csv")
-
-        return df_results
     else:
-        print("❌ 没有有效的回测结果")
-        return None
+        print("❌ 没有找到任何可用的参数结果")
+
+    best_bt.export_trades("best_grid_trade.csv")
+    best_bt.export_equity_curve("best_grid_equity_curve.csv")
+    best_bt.export_positions("best_grid_positions.csv")
+
+    return df_results
 
 
 # -------- 🧪 配置示例 -------- #
 
 CONFIG = {
     "initial_balance": 1000,
-    "order_value": 10,  # 每次固定用 10 美金下单
+    "order_value": 10,  # 每次固定用 50 美金下单
     "max_drawdown": 0.9,   # 超过该回撤比例时停止回测
-    "max_positions": 20,  # 最大持仓数
-    "fee_pct": 0.0000,  # 手续费万二
-    "direction": "long",  # or "long" / "short" 网格方向 both
+    "max_positions": 100,  # 最大持仓数
+    "fee_pct": 0.0002,  # 手续费万二
+    "direction": "long",  # or "long" / "short" 网格方向
     "leverage": 1,
     "start_date": datetime(2025, 7, 1),
     "end_date": datetime(2025, 7, 31),
-    "param_sets": [  # 改为测试多组完整参数
-        {
-            "name": "保守策略",
-            "long_settings": {"up_spacing": 0.003, "down_spacing": 0.003},
-            "short_settings": {"up_spacing": 0.003, "down_spacing": 0.003}
-        },
-        # {
-        #     "name": "激进策略",
-        #     "long_settings": {"up_spacing": 0.004, "down_spacing": 0.001},
-        #     "short_settings": {"up_spacing": 0.001, "down_spacing": 0.004}
-        # }
-    ],
-
-    "grid_refresh_interval": 2  # 每 10 分钟刷新一次挂单
+    "grid_spacing_range": [0.003, 0.004, 0.001],  # 表示 0.5%, 1%, 1.5% 间距
+    "grid_refresh_interval": 500  # 每 10 分钟刷新一次挂单
 }
 
 # -------- 🔁 启动 -------- #
